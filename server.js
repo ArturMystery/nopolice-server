@@ -2,41 +2,59 @@ const http = require("http");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 7778;
+const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-const state = {
-  phase: "lobby",
-  maxPlayers: 2,
-  configDuration: 510,
-  configDiff: "Normal",
-  configHungerMode: 0,
-  configLockSecs: 10,
-  gen: 0,
-  gameOver: false,
-  won: false,
-  endReason: "",
-  timeRemaining: 510,
-  hunger: 100,
-  doorLocked: false,
-  doorBar: 10,
-  windowClosed: false,
-  windowBar: 10,
-  evSeq: 0,
-  evType: "",
-  evX: 0,
-  evY: 0,
-  evText: "",
-  radioSeq: 0,
-  radioSender: "",
-  radioMsg: "",
-  players: []
-};
+const rooms = new Map();       // roomCode -> roomState
+const tokenToRoom = new Map(); // token -> roomCode
 
-function pushEv(tp, x, y, txt) {
-  state.evSeq++;
-  state.evType = tp;
-  state.evX = x;
-  state.evY = y;
-  state.evText = txt;
+function makeRoomCode() {
+  for (let tries = 0; tries < 50; tries++) {
+    const bytes = crypto.randomBytes(6);
+    let code = "";
+    for (let i = 0; i < 6; i++) code += CODE_CHARS[bytes[i] % CODE_CHARS.length];
+    if (!rooms.has(code)) return code;
+  }
+  return crypto.randomBytes(3).toString("hex").toUpperCase();
+}
+
+function createRoom(code) {
+  return {
+    code,
+    lastActivity: Date.now(),
+    phase: "lobby",
+    maxPlayers: 2,
+    configDuration: 510,
+    configDiff: "Normal",
+    configHungerMode: 0,
+    configLockSecs: 10,
+    gen: 0,
+    gameOver: false,
+    won: false,
+    endReason: "",
+    timeRemaining: 510,
+    hunger: 100,
+    doorLocked: false,
+    doorBar: 10,
+    windowClosed: false,
+    windowBar: 10,
+    evSeq: 0,
+    evType: "",
+    evX: 0,
+    evY: 0,
+    evText: "",
+    radioSeq: 0,
+    radioSender: "",
+    radioMsg: "",
+    voiceSeq: 0,
+    voiceFromRole: 0,
+    voiceSender: "",
+    voiceB64: "",
+    players: []
+  };
+}
+
+function pushEv(st, tp, x, y, txt) {
+  st.evSeq++; st.evType = tp; st.evX = x; st.evY = y; st.evText = txt;
 }
 
 function setSpawn(p) {
@@ -46,56 +64,48 @@ function setSpawn(p) {
   else if (p.role === 4) { p.x = 145; p.y = 320; p.room = -1; }
 }
 
-function resetMatch() {
-  state.gen++;
-  state.gameOver = false;
-  state.won = false;
-  state.endReason = "";
-  state.timeRemaining = state.configDuration;
-  state.hunger = 100;
-  state.doorLocked = false;
-  state.doorBar = state.configLockSecs;
-  state.windowClosed = false;
-  state.windowBar = state.configLockSecs;
-  for (const p of state.players) {
-    p.moving = false;
-    p.carryingFood = false;
-    p.stunnedTimer = 0;
-    p.noiseCooldown = 0;
+function resetMatch(st) {
+  st.gen++; st.gameOver = false; st.won = false; st.endReason = "";
+  st.timeRemaining = st.configDuration; st.hunger = 100;
+  st.doorLocked = false; st.doorBar = st.configLockSecs;
+  st.windowClosed = false; st.windowBar = st.configLockSecs;
+  for (const p of st.players) {
+    p.moving = false; p.carryingFood = false; p.stunnedTimer = 0; p.noiseCooldown = 0;
     setSpawn(p);
   }
-  pushEv("reset", 470, 320, "PARTIDA REINICIADA!");
+  pushEv(st, "reset", 470, 320, "PARTIDA REINICIADA!");
 }
 
-function ensureBots() {
-  state.players = state.players.filter(p => !p.token.startsWith("BOT_"));
-  const limit = state.maxPlayers >= 4 ? 4 : 3;
+function ensureBots(st) {
+  st.players = st.players.filter(p => !p.token.startsWith("BOT_"));
+  const limit = st.maxPlayers >= 4 ? 4 : 3;
   for (let r = 1; r <= limit; r++) {
-    if (!state.players.some(p => p.role === r)) {
-      const names = ["", "IrmaoVelho(IA)", "IrmaoNovo(IA)", "Sequestrador(IA)", "Amigo(IA)"];
+    if (!st.players.some(p => p.role === r)) {
+      const names = ["", "Irmao Mais Velho", "Irmao Mais Novo", "Sequestrador", "Amigo"];
       const b = {
         token: "BOT_" + r, nick: names[r], role: r, isHost: false,
         x: 440, y: 220, room: 0, moving: false, carryingFood: false,
-        stunnedTimer: 0, noiseCooldown: 0, doorEntryCooldown: 15, aiTimer: 1, aiTarget: { x: 765, y: 150 }
+        stunnedTimer: 0, noiseCooldown: 0, doorEntryCooldown: 30, aiTimer: 1
       };
       setSpawn(b);
-      state.players.push(b);
+      st.players.push(b);
     }
   }
 }
 
-function serializeState() {
+function serializeState(st) {
   const head = [
-    state.phase, state.maxPlayers, Math.round(state.configDuration), state.configDiff, state.gen,
-    state.gameOver ? 1 : 0, state.won ? 1 : 0, state.endReason.replace(/;/g, " "),
-    state.timeRemaining.toFixed(1), state.hunger.toFixed(1),
-    state.doorLocked ? 1 : 0, state.doorBar.toFixed(1),
-    state.windowClosed ? 1 : 0, state.windowBar.toFixed(1),
-    state.evSeq, state.evType, state.evX.toFixed(1), state.evY.toFixed(1), state.evText.replace(/;/g, " "),
-    state.radioSeq, state.radioSender.replace(/;/g, " "), state.radioMsg.replace(/;/g, " ")
+    st.phase, st.maxPlayers, Math.round(st.configDuration), st.configDiff, st.gen,
+    st.gameOver ? 1 : 0, st.won ? 1 : 0, st.endReason.replace(/;/g, " "),
+    st.timeRemaining.toFixed(1), st.hunger.toFixed(1),
+    st.doorLocked ? 1 : 0, st.doorBar.toFixed(1),
+    st.windowClosed ? 1 : 0, st.windowBar.toFixed(1),
+    st.evSeq, st.evType, st.evX.toFixed(1), st.evY.toFixed(1), st.evText.replace(/;/g, " "),
+    st.radioSeq, st.radioSender.replace(/;/g, " "), st.radioMsg.replace(/;/g, " "),
+    st.voiceSeq, st.voiceFromRole, st.voiceSender.replace(/;/g, " ")
   ].join(";");
 
-  const plist = state.players.map(p => [
+  const plist = st.players.map(p => [
     p.nick.replace(/:/g, ""), p.role, p.isHost ? 1 : 0,
     p.x.toFixed(1), p.y.toFixed(1), p.room,
     p.moving ? 1 : 0, p.carryingFood ? 1 : 0,
@@ -105,84 +115,118 @@ function serializeState() {
   return head + "#" + plist;
 }
 
+function getRoomByToken(tok) {
+  const code = tokenToRoom.get(tok);
+  return code ? rooms.get(code) : null;
+}
+
 function processCommand(line) {
   const parts = line.trim().split("|");
   const op = parts[0];
-  const findTok = tok => state.players.find(p => p.token === tok);
+
+  if (op === "PING") return "PONG";
 
   if (op === "HOST") {
     const nick = parts[1] || "Anfitriao";
-    state.maxPlayers = 2; state.phase = "lobby"; state.configDuration = 510; state.configDiff = "Normal";
-    state.configHungerMode = 0; state.configLockSecs = 10;
-    state.players = [];
-    resetMatch();
+    const code = makeRoomCode();
+    const st = createRoom(code);
     const tok = crypto.randomBytes(5).toString("hex");
-    state.players.push({
+    st.players.push({
       token: tok, nick, role: 1, isHost: true, x: 440, y: 220, room: 0,
       moving: false, carryingFood: false, stunnedTimer: 0, noiseCooldown: 0
     });
-    return "OK|" + tok + "|ONLINE";
+    rooms.set(code, st);
+    tokenToRoom.set(tok, code);
+    return `OK|${tok}|${code}`;
   }
+
   if (op === "JOIN") {
     const nick = parts[1] || "Jogador";
-    if (state.players.length === 0) return "ERR|Nenhuma sala aberta no servidor.";
-    if (state.players.length >= state.maxPlayers) return `ERR|Partida ja esta lotada! (${state.players.length}/${state.maxPlayers})`;
-    if (state.phase !== "lobby") return "ERR|A partida ja comecou!";
+    const reqCode = (parts[2] || "").trim().toUpperCase();
+    let st = reqCode ? rooms.get(reqCode) : null;
+    if (!st && !reqCode && rooms.size > 0) {
+      // Fallback: ultima sala criada se nao informou codigo
+      st = Array.from(rooms.values())[rooms.size - 1];
+    }
+    if (!st) return reqCode ? `ERR|Sala '${reqCode}' nao encontrada!` : "ERR|Digite o codigo de 5 letras da sala!";
+    st.lastActivity = Date.now();
+    if (st.players.length >= st.maxPlayers) return `ERR|Partida ja esta lotada! (${st.players.length}/${st.maxPlayers})`;
+    if (st.phase !== "lobby") return "ERR|A partida ja comecou!";
     const tok = crypto.randomBytes(5).toString("hex");
-    const r = state.players.length + 1;
-    state.players.push({
+    const r = st.players.length + 1;
+    st.players.push({
       token: tok, nick, role: r, isHost: false, x: 440 + (r - 1) * 42, y: 220, room: 0,
       moving: false, carryingFood: false, stunnedTimer: 0, noiseCooldown: 0
     });
-    return `OK|${tok}|${r}|${state.maxPlayers}`;
+    tokenToRoom.set(tok, st.code);
+    return `OK|${tok}|${r}|${st.maxPlayers}|${st.code}`;
   }
+
+  if (op === "STATE") {
+    const key = parts[1] || "";
+    const st = getRoomByToken(key) || rooms.get(key.toUpperCase());
+    if (!st) return "ONLINE_OK";
+    st.lastActivity = Date.now();
+    return serializeState(st);
+  }
+
+  const tok = parts[1] || "";
+  const st = getRoomByToken(tok);
+  if (!st) return "ERR|Sala encerrada.";
+  st.lastActivity = Date.now();
+  const me = st.players.find(p => p.token === tok);
+
   if (op === "CFG" && parts.length >= 5) {
-    const h = findTok(parts[1]);
-    if (h && h.isHost && state.phase === "lobby") {
-      state.maxPlayers = Math.max(2, Math.min(4, parseInt(parts[2], 10) || 2));
-      state.configDuration = parseFloat(parts[3]) || 510;
-      state.configDiff = parts[4] || "Normal";
-      if (parts.length >= 6) state.configHungerMode = parseInt(parts[5], 10) || 0;
+    if (me && me.isHost) {
+      st.maxPlayers = Math.max(2, Math.min(4, parseInt(parts[2], 10) || 2));
+      st.configDuration = parseFloat(parts[3]) || 510;
+      st.configDiff = parts[4] || "Normal";
+      if (parts.length >= 6) st.configHungerMode = parseInt(parts[5], 10) || 0;
       if (parts.length >= 7) {
-        state.configLockSecs = parseFloat(parts[6]) || 10;
-        state.doorBar = state.configLockSecs;
-        state.windowBar = state.configLockSecs;
+        st.configLockSecs = parseFloat(parts[6]) || 10;
+        st.doorBar = st.configLockSecs;
+        st.windowBar = st.configLockSecs;
       }
     }
-    return serializeState();
+    return serializeState(st);
   }
   if (op === "BEGIN_SELECT") {
-    const h = findTok(parts[1]);
-    if (h && h.isHost) state.phase = "select";
-    return serializeState();
+    if (me && me.isHost) {
+      st.players = st.players.filter(p => !p.token.startsWith("BOT_"));
+      for (const p of st.players) p.role = 0;
+      st.phase = "select";
+    }
+    return serializeState(st);
   }
   if (op === "PICK" && parts.length >= 3) {
-    const me = findTok(parts[1]);
     const wanted = parseInt(parts[2], 10);
-    if (me && state.phase === "select" && wanted >= 1 && wanted <= state.maxPlayers) {
-      if (!state.players.some(o => o !== me && o.role === wanted)) {
-        me.role = wanted;
-        setSpawn(me);
+    if (me && st.phase === "select" && wanted >= 1 && wanted <= st.maxPlayers) {
+      const owner = st.players.find(o => o !== me && o.role === wanted);
+      if (owner) return "ERR|Ja foi pego por " + owner.nick + "!";
+      me.role = wanted;
+      setSpawn(me);
+      const humans = st.players.filter(p => !p.token.startsWith("BOT_"));
+      if (humans.length > 0 && humans.every(p => p.role >= 1 && p.role <= st.maxPlayers)) {
+        resetMatch(st);
+        ensureBots(st);
+        st.phase = "playing";
       }
     }
-    return serializeState();
+    return serializeState(st);
   }
   if (op === "START_MATCH" || op === "RESET") {
-    const h = findTok(parts[1]);
-    if (h && h.isHost) { resetMatch(); ensureBots(); state.phase = "playing"; }
-    return serializeState();
+    if (me && me.isHost) { resetMatch(st); ensureBots(st); st.phase = "playing"; }
+    return serializeState(st);
   }
   if (op === "LOBBY_BACK") {
-    const h = findTok(parts[1]);
-    if (h && h.isHost) {
-      state.phase = "lobby";
-      state.players = state.players.filter(p => !p.token.startsWith("BOT_"));
-      state.players.forEach((p, idx) => { p.x = 440 + idx * 42; p.y = 220; p.room = 0; });
+    if (me && me.isHost) {
+      st.phase = "lobby";
+      st.players = st.players.filter(p => !p.token.startsWith("BOT_"));
+      st.players.forEach((p, idx) => { p.x = 440 + idx * 42; p.y = 220; p.room = 0; });
     }
-    return serializeState();
+    return serializeState(st);
   }
   if (op === "SYNC" && parts.length >= 7) {
-    const me = findTok(parts[1]);
     if (me) {
       me.x = parseFloat(parts[2]) || me.x;
       me.y = parseFloat(parts[3]) || me.y;
@@ -190,61 +234,69 @@ function processCommand(line) {
       me.moving = parts[5] === "1";
       me.carryingFood = parts[6] === "1";
     }
-    return serializeState();
+    return serializeState(st);
   }
   if (op === "ACT" && parts.length >= 3) {
-    const me = findTok(parts[1]);
     const act = parts[2];
-    if (me && state.phase === "playing" && !state.gameOver) {
-      if (act === "door" && me.role === 1 && !state.doorLocked && !state.windowClosed && state.doorBar >= state.configLockSecs - 0.1) {
-        state.doorLocked = true; pushEv("door_lock", 700, 375, "PORTA TRANCADA!");
-      } else if (act === "window" && me.role === 2 && !state.windowClosed && !state.doorLocked && state.windowBar >= state.configLockSecs - 0.1) {
-        state.windowClosed = true; pushEv("window_close", 700, 150, "JANELA FECHADA!");
+    if (me && st.phase === "playing" && !st.gameOver) {
+      if (act === "door" && me.role === 1 && !st.doorLocked && !st.windowClosed && st.doorBar >= st.configLockSecs - 0.1) {
+        st.doorLocked = true; pushEv(st, "door_lock", 700, 375, "PORTA TRANCADA!");
+      } else if (act === "window" && me.role === 2 && !st.windowClosed && !st.doorLocked && st.windowBar >= st.configLockSecs - 0.1) {
+        st.windowClosed = true; pushEv(st, "window_close", 700, 150, "JANELA FECHADA!");
       } else if (act === "food" && me.role === 1) {
-        me.carryingFood = false; state.hunger = Math.min(100, state.hunger + 45); pushEv("food", me.x, me.y, "+45% COMIDA!");
+        me.carryingFood = false; st.hunger = Math.min(100, st.hunger + 45); pushEv(st, "food", me.x, me.y, "+45% COMIDA!");
       } else if (act === "noise" && me.noiseCooldown <= 0 && me.stunnedTimer <= 0) {
-        me.noiseCooldown = 12; pushEv("noise", me.role <= 2 ? 700 : me.x, me.role <= 2 ? 150 : me.y, "BARULHO!");
+        me.noiseCooldown = 12; pushEv(st, "noise", me.role <= 2 ? 700 : me.x, me.role <= 2 ? 150 : me.y, "BARULHO!");
       } else if (act === "radio" && parts.length >= 4) {
-        state.radioSeq++; state.radioSender = me.nick; state.radioMsg = parts[3];
+        st.radioSeq++; st.radioSender = me.nick; st.radioMsg = parts[3];
       }
     }
-    return serializeState();
+    return serializeState(st);
   }
-  return serializeState();
+  if (op === "VOICE" && parts.length >= 3) {
+    if (me && me.role !== 3) { st.voiceSeq++; st.voiceFromRole = me.role; st.voiceSender = me.nick; st.voiceB64 = parts[2]; }
+    return "OK_VOICE|" + st.voiceSeq;
+  }
+  if (op === "GET_VOICE") {
+    return st.voiceB64 || "";
+  }
+  return serializeState(st);
 }
 
-// Tick de simulacao do servidor online (20 Hz)
+// Tick de simulacao para todas as salas ativas + limpeza de salas inativas (>30 min)
 setInterval(() => {
-  if (state.phase !== "playing" || state.gameOver) return;
-  const dt = 0.05;
-  state.timeRemaining -= dt;
-  if (state.timeRemaining <= 0) { state.timeRemaining = 0; state.gameOver = true; state.won = true; state.endReason = "06:00 DA MANHA! Vitoria!"; return; }
-  const hRate = state.configHungerMode === 1 ? 1.85 : (state.configHungerMode === 2 ? 0 : 1.05);
-  state.hunger -= dt * hRate;
-  if (state.hunger <= 0) { state.hunger = 0; state.gameOver = true; state.won = false; state.endReason = "Os irmaos desmaiaram de fome!"; return; }
-
-  if (state.doorLocked) {
-    state.doorBar -= dt;
-    if (state.doorBar <= 0) { state.doorBar = 0; state.doorLocked = false; pushEv("door_open", 700, 375, "PORTA DESTRANCOU!"); }
-  } else state.doorBar = Math.min(state.configLockSecs, state.doorBar + dt);
-
-  if (state.windowClosed) {
-    state.windowBar -= dt;
-    if (state.windowBar <= 0) { state.windowBar = 0; state.windowClosed = false; pushEv("window_open", 700, 150, "JANELA ABRIU!"); }
-  } else state.windowBar = Math.min(state.configLockSecs, state.windowBar + dt);
-
-  for (const p of state.players) {
-    if (p.stunnedTimer > 0) p.stunnedTimer = Math.max(0, p.stunnedTimer - dt);
-    if (p.noiseCooldown > 0) p.noiseCooldown = Math.max(0, p.noiseCooldown - dt);
+  const now = Date.now();
+  for (const [code, st] of rooms.entries()) {
+    if (now - st.lastActivity > 30 * 60 * 1000) { rooms.delete(code); continue; }
+    if (st.phase !== "playing" || st.gameOver) continue;
+    const dt = 0.05;
+    st.timeRemaining -= dt;
+    if (st.timeRemaining <= 0) { st.timeRemaining = 0; st.gameOver = true; st.won = true; st.endReason = "06:00 DA MANHA! Vitoria!"; continue; }
+    const hRate = st.configHungerMode === 1 ? 1.85 : (st.configHungerMode === 2 ? 0 : 1.05);
+    st.hunger -= dt * hRate;
+    if (st.hunger <= 0) { st.hunger = 0; st.gameOver = true; st.won = false; st.endReason = "Os irmaos desmaiaram de fome!"; continue; }
+    if (st.doorLocked) {
+      st.doorBar -= dt;
+      if (st.doorBar <= 0) { st.doorBar = 0; st.doorLocked = false; pushEv(st, "door_open", 700, 375, "PORTA DESTRANCOU!"); }
+    } else st.doorBar = Math.min(st.configLockSecs, st.doorBar + dt);
+    if (st.windowClosed) {
+      st.windowBar -= dt;
+      if (st.windowBar <= 0) { st.windowBar = 0; st.windowClosed = false; pushEv(st, "window_open", 700, 150, "JANELA ABRIU!"); }
+    } else st.windowBar = Math.min(st.configLockSecs, st.windowBar + dt);
+    for (const p of st.players) {
+      if (p.stunnedTimer > 0) p.stunnedTimer = Math.max(0, p.stunnedTimer - dt);
+      if (p.noiseCooldown > 0) p.noiseCooldown = Math.max(0, p.noiseCooldown - dt);
+    }
   }
 }, 50);
 
 const server = http.createServer((req, res) => {
+  if (req.socket) req.socket.setNoDelay(true);
+  res.setHeader("Connection", "keep-alive");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
-
   if (req.url === "/cmd" && req.method === "POST") {
     let body = "";
     req.on("data", chunk => { body += chunk.toString(); });
@@ -254,9 +306,10 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("NoPolice Online Server OK! Use POST /cmd pelo PC (.exe) ou Android (.apk).");
+  res.end("NoPolice Cross-Play Server v1.0.8 OK! Salas ativas: " + rooms.size);
 });
 
-server.listen(PORT, () => console.log("NoPolice Online Server rodando na porta", PORT));
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+server.listen(PORT, () => console.log("NoPolice Cross-Play Server v1.0.9 na porta", PORT));

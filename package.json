@@ -1,0 +1,12 @@
+{
+  "name": "nopolice-online-server",
+  "version": "1.0.0",
+  "description": "Servidor Online Multiplayer Cross-Platform para NoPolice (PC .exe + Android .apk)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

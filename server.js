@@ -178,7 +178,8 @@ function processCommand(line) {
 
   if (op === "CFG" && parts.length >= 5) {
     if (me && me.isHost) {
-      st.maxPlayers = Math.max(2, Math.min(4, parseInt(parts[2], 10) || 2));
+      const curHumans = st.players.filter(p => !p.token.startsWith("BOT_")).length;
+      st.maxPlayers = Math.max(curHumans, Math.max(2, Math.min(4, parseInt(parts[2], 10) || 2)));
       st.configDuration = parseFloat(parts[3]) || 510;
       st.configDiff = parts[4] || "Normal";
       if (parts.length >= 6) st.configHungerMode = parseInt(parts[5], 10) || 0;
@@ -192,7 +193,11 @@ function processCommand(line) {
   }
   if (op === "BEGIN_SELECT") {
     if (me && me.isHost) {
-      st.players = st.players.filter(p => !p.token.startsWith("BOT_"));
+      const humans = st.players.filter(p => !p.token.startsWith("BOT_"));
+      if (humans.length < st.maxPlayers) {
+        return `ERR|Faltam jogadores! (${humans.length}/${st.maxPlayers} na sala)`;
+      }
+      st.players = humans;
       for (const p of st.players) p.role = 0;
       st.phase = "select";
     }
@@ -206,7 +211,7 @@ function processCommand(line) {
       me.role = wanted;
       setSpawn(me);
       const humans = st.players.filter(p => !p.token.startsWith("BOT_"));
-      if (humans.length > 0 && humans.every(p => p.role >= 1 && p.role <= st.maxPlayers)) {
+      if (humans.length === st.maxPlayers && humans.every(p => p.role >= 1 && p.role <= st.maxPlayers)) {
         resetMatch(st);
         ensureBots(st);
         st.phase = "playing";
@@ -215,7 +220,13 @@ function processCommand(line) {
     return serializeState(st);
   }
   if (op === "START_MATCH" || op === "RESET") {
-    if (me && me.isHost) { resetMatch(st); ensureBots(st); st.phase = "playing"; }
+    if (me && me.isHost) {
+      const humans = st.players.filter(p => !p.token.startsWith("BOT_"));
+      if (op === "START_MATCH" && humans.length < st.maxPlayers) {
+        return `ERR|Faltam jogadores! (${humans.length}/${st.maxPlayers} na sala)`;
+      }
+      resetMatch(st); ensureBots(st); st.phase = "playing";
+    }
     return serializeState(st);
   }
   if (op === "LOBBY_BACK") {
@@ -254,7 +265,7 @@ function processCommand(line) {
     return serializeState(st);
   }
   if (op === "VOICE" && parts.length >= 3) {
-    if (me && me.role !== 3) { st.voiceSeq++; st.voiceFromRole = me.role; st.voiceSender = me.nick; st.voiceB64 = parts[2]; }
+    if (me && (st.phase === "lobby" || me.role !== 3)) { st.voiceSeq++; st.voiceFromRole = me.role; st.voiceSender = me.nick; st.voiceB64 = parts[2]; }
     return "OK_VOICE|" + st.voiceSeq;
   }
   if (op === "GET_VOICE") {

@@ -152,7 +152,7 @@ function processCommand(line, wsClient) {
   const parts = line.trim().split("|");
   const op = parts[0];
 
-  if (op === "PING") return "PONG";
+  if (op === "PING") return parts.length > 1 ? ("PONG|" + parts[1]) : "PONG";
 
   if (op === "HOST") {
     const nick = parts[1] || "Anfitriao";
